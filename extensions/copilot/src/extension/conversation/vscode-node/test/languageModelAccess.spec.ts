@@ -4,6 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { OutputMode } from '@vscode/prompt-tsx';
+import { beforeEach, describe, it } from 'vitest';
 import * as vscode from 'vscode';
 import { IChatMLFetcher } from '../../../../platform/chat/common/chatMLFetcher';
 import { MockChatMLFetcher } from '../../../../platform/chat/test/common/mockChatMLFetcher';
@@ -11,11 +13,35 @@ import { IEndpointProvider } from '../../../../platform/endpoint/common/endpoint
 import { IVSCodeExtensionContext } from '../../../../platform/extContext/common/extensionContext';
 import { IChatEndpoint } from '../../../../platform/networking/common/networking';
 import { ITestingServicesAccessor } from '../../../../platform/test/node/services';
+import { ITokenizerProvider } from '../../../../platform/tokenizer/node/tokenizer';
+import { ITokenizer as IUtilTokenizer } from '../../../../util/common/tokenizer';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { createExtensionTestingServices } from '../../../test/vscode-node/services';
 import { CopilotLanguageModelWrapper } from '../languageModelAccess';
 import { ExtensionContributedChatEndpoint } from '../../../../platform/endpoint/vscode-node/extChatEndpoint';
+
+const testExtensionId = 'github.copilot.test';
+
+function ensureMockExtensionsApi(): void {
+	Object.defineProperty(vscode, 'extensions', {
+		configurable: true,
+		value: {
+			all: [{ id: testExtensionId }],
+			getExtension: (id: string) => id === testExtensionId ? { packageJSON: { version: '1.0.0-test' } } : undefined,
+		}
+	});
+}
+
+function createMockTokenizer(): IUtilTokenizer {
+	return {
+		mode: OutputMode.Raw,
+		tokenLength: async () => 0,
+		countMessageTokens: async () => 0,
+		countMessagesTokens: async () => 0,
+		countToolTokens: async () => 0,
+	};
+}
 
 class MockExtensionContributedLanguageModel implements Partial<vscode.LanguageModelChat> {
 	public readonly vendor = 'mock-vendor';
@@ -47,22 +73,27 @@ class MockExtensionContributedLanguageModel implements Partial<vscode.LanguageMo
 }
 
 
-suite('CopilotLanguageModelWrapper', () => {
+describe('CopilotLanguageModelWrapper', () => {
 	let accessor: ITestingServicesAccessor;
 	let instaService: IInstantiationService;
 
 	function createAccessor(vscodeExtensionContext?: IVSCodeExtensionContext) {
+		ensureMockExtensionsApi();
 		const testingServiceCollection = createExtensionTestingServices();
 		testingServiceCollection.define(IChatMLFetcher, new MockChatMLFetcher());
+		testingServiceCollection.define(ITokenizerProvider, {
+			_serviceBrand: undefined,
+			acquireTokenizer: () => createMockTokenizer(),
+		} satisfies ITokenizerProvider);
 
 		accessor = testingServiceCollection.createTestingAccessor();
 		instaService = accessor.get(IInstantiationService);
 	}
 
-	suite('validateRequest - invalid', () => {
+	describe('validateRequest - invalid', () => {
 		let wrapper: CopilotLanguageModelWrapper;
 		let endpoint: IChatEndpoint;
-		setup(async () => {
+		beforeEach(async () => {
 			createAccessor();
 			endpoint = await accessor.get(IEndpointProvider).getChatEndpoint('copilot-base');
 			wrapper = instaService.createInstance(CopilotLanguageModelWrapper);
@@ -70,7 +101,7 @@ suite('CopilotLanguageModelWrapper', () => {
 
 		const runTest = async (messages: vscode.LanguageModelChatMessage[], tools?: vscode.LanguageModelChatTool[], errMsg?: string) => {
 			await assert.rejects(
-				() => wrapper.provideLanguageModelResponse(endpoint, messages, { tools, requestInitiator: 'unknown', toolMode: vscode.LanguageModelChatToolMode.Auto }, vscode.extensions.all[0].id, { report: () => { } }, CancellationToken.None),
+				() => wrapper.provideLanguageModelResponse(endpoint, messages, { tools, requestInitiator: 'unknown', toolMode: vscode.LanguageModelChatToolMode.Auto }, testExtensionId, { report: () => { } }, CancellationToken.None),
 				err => {
 					errMsg ??= 'Invalid request';
 					assert.ok(err instanceof Error, 'expected an Error');
@@ -80,32 +111,32 @@ suite('CopilotLanguageModelWrapper', () => {
 			);
 		};
 
-		test('empty', async () => {
+		it('empty', async () => {
 			await runTest([]);
 		});
 
-		test('bad tool name', async () => {
+		it('bad tool name', async () => {
 			await runTest([vscode.LanguageModelChatMessage.User('hello')], [{ name: 'hello world', description: 'my tool' }], 'Invalid tool name');
 		});
 	});
 
-	suite('validateRequest - valid', () => {
+	describe('validateRequest - valid', () => {
 		let wrapper: CopilotLanguageModelWrapper;
 		let endpoint: IChatEndpoint;
-		setup(async () => {
+		beforeEach(async () => {
 			createAccessor();
 			endpoint = await accessor.get(IEndpointProvider).getChatEndpoint('copilot-base');
 			wrapper = instaService.createInstance(CopilotLanguageModelWrapper);
 		});
 		const runTest = async (messages: vscode.LanguageModelChatMessage[], tools?: vscode.LanguageModelChatTool[]) => {
-			await wrapper.provideLanguageModelResponse(endpoint, messages, { tools, requestInitiator: 'unknown', toolMode: vscode.LanguageModelChatToolMode.Auto }, vscode.extensions.all[0].id, { report: () => { } }, CancellationToken.None);
+			await wrapper.provideLanguageModelResponse(endpoint, messages, { tools, requestInitiator: 'unknown', toolMode: vscode.LanguageModelChatToolMode.Auto }, testExtensionId, { report: () => { } }, CancellationToken.None);
 		};
 
-		test('simple', async () => {
+		it('simple', async () => {
 			await runTest([vscode.LanguageModelChatMessage.User('hello')]);
 		});
 
-		test('tool call and user message', async () => {
+		it('tool call and user message', async () => {
 			const toolCall = vscode.LanguageModelChatMessage.Assistant('');
 			toolCall.content = [new vscode.LanguageModelToolCallPart('id', 'func', { param: 123 })];
 			const toolResult = vscode.LanguageModelChatMessage.User('');
@@ -113,11 +144,11 @@ suite('CopilotLanguageModelWrapper', () => {
 			await runTest([toolCall, toolResult, vscode.LanguageModelChatMessage.User('user message')]);
 		});
 
-		test('good tool name', async () => {
+		it('good tool name', async () => {
 			await runTest([vscode.LanguageModelChatMessage.User('hello2')], [{ name: 'hello_world', description: 'my tool' }]);
 		});
 
-		test('class-based extension endpoint does not regress when cloning prompt token limit', async () => {
+		it('class-based extension endpoint does not regress when cloning prompt token limit', async () => {
 			const extensionModel = new MockExtensionContributedLanguageModel() as vscode.LanguageModelChat;
 			const extensionEndpoint = instaService.createInstance(ExtensionContributedChatEndpoint, extensionModel, undefined);
 
@@ -125,7 +156,7 @@ suite('CopilotLanguageModelWrapper', () => {
 				extensionEndpoint,
 				[vscode.LanguageModelChatMessage.User('hello')],
 				{ requestInitiator: 'unknown', toolMode: vscode.LanguageModelChatToolMode.Auto },
-				vscode.extensions.all[0].id,
+				testExtensionId,
 				{ report: () => { } },
 				CancellationToken.None,
 			);
